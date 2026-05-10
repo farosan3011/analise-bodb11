@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Dados do tracker (banco SQLite local - não versionar)
+precatorio_tracker/data/
+
+# Site extraído do zip (gerado, não versionar)
+site_bodb11/
