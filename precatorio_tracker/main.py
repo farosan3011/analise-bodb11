@@ -5,12 +5,12 @@ Assistente de Rastreamento de Precatórios TJSP
 Uso:
   python main.py buscar --cidade "São Paulo" --depre 12345
   python main.py historico --depre 12345
+  python main.py historico --depre 12345 --cidade "São Paulo"
   python main.py listar
   python main.py atualizar
 """
 
 import argparse
-import sys
 
 import database as db
 import display
@@ -20,42 +20,47 @@ import scraper
 def cmd_buscar(args):
     db.init_db()
 
-    resultados = scraper.buscar(args.cidade, args.depre, headless=not args.browser)
+    dados = scraper.buscar(args.cidade, args.depre, headless=not args.browser)
 
-    if not resultados:
+    if not dados:
         display.aviso(f"Nenhum dado encontrado para DEPRE {args.depre} em {args.cidade}.")
         return
 
-    # Salva no banco
     precatorio_id = db.upsert_precatorio(args.depre, args.cidade)
+    salvo = db.save_snapshot(precatorio_id, dados)
 
-    if len(resultados) > 1:
-        display.mostrar_multiplos_resultados(resultados)
-
-    for dados in resultados:
-        db.save_snapshot(precatorio_id, dados)
-
-    # Busca snapshot anterior para mostrar variação
-    historico = db.get_history(args.depre)
+    historico = db.get_history(args.depre, args.cidade)
     anterior = historico[1] if len(historico) > 1 else None
 
-    # Enriquece com timestamp do banco (o snapshot recém-salvo é o primeiro)
-    dados_exibir = resultados[0].copy()
+    dados_exibir = dados.copy()
     if historico:
         dados_exibir["capturado_em"] = historico[0]["capturado_em"]
 
     display.mostrar_resultado(dados_exibir, anterior=anterior)
 
-    if len(resultados) > 1:
-        display.aviso(
-            f"{len(resultados)} registro(s) salvos. "
-            "Use 'historico' para ver o rastreamento completo."
-        )
+    if not salvo:
+        display.aviso("Posição e status inalterados desde a última consulta — nenhum novo snapshot gravado.")
 
 
 def cmd_historico(args):
     db.init_db()
-    snapshots = db.get_history(args.depre)
+    cidade = getattr(args, "cidade", None)
+    snapshots = db.get_history(args.depre, cidade)
+
+    if not snapshots:
+        display.aviso(f"Nenhum histórico para DEPRE {args.depre}.")
+        return
+
+    # Avisa se há registros em múltiplas cidades e cidade não foi filtrada
+    if not cidade:
+        cidades = {s["cidade"] for s in snapshots}
+        if len(cidades) > 1:
+            display.aviso(
+                f"DEPRE {args.depre} rastreado em {len(cidades)} cidades: "
+                + ", ".join(sorted(cidades))
+                + ". Use --cidade para filtrar."
+            )
+
     display.mostrar_historico(snapshots)
 
 
@@ -76,22 +81,25 @@ def cmd_atualizar(args):
     display.sucesso(f"Atualizando {len(rastreados)} precatório(s)...")
 
     erros = 0
+    sem_mudanca = 0
     for item in rastreados:
         depre = item["depre"]
         cidade = item["cidade"]
         print(f"\n→ DEPRE {depre} — {cidade}")
         try:
-            resultados = scraper.buscar(cidade, depre, headless=not args.browser)
-            if resultados:
+            dados = scraper.buscar(cidade, depre, headless=not args.browser)
+            if dados:
                 precatorio_id = db.upsert_precatorio(depre, cidade)
-                for dados in resultados:
-                    db.save_snapshot(precatorio_id, dados)
-                historico = db.get_history(depre)
+                salvo = db.save_snapshot(precatorio_id, dados)
+                historico = db.get_history(depre, cidade)
                 anterior = historico[1] if len(historico) > 1 else None
-                dados_exibir = resultados[0].copy()
+                dados_exibir = dados.copy()
                 if historico:
                     dados_exibir["capturado_em"] = historico[0]["capturado_em"]
                 display.mostrar_resultado(dados_exibir, anterior=anterior)
+                if not salvo:
+                    display.aviso("Sem mudanças desde a última consulta.")
+                    sem_mudanca += 1
             else:
                 display.aviso(f"Sem dados para DEPRE {depre} em {cidade}.")
         except Exception as e:
@@ -99,8 +107,13 @@ def cmd_atualizar(args):
             erros += 1
 
     print()
+    partes = []
     if erros:
-        display.aviso(f"Atualização concluída com {erros} erro(s).")
+        partes.append(f"{erros} erro(s)")
+    if sem_mudanca:
+        partes.append(f"{sem_mudanca} sem mudança")
+    if partes:
+        display.aviso("Atualização concluída: " + ", ".join(partes) + ".")
     else:
         display.sucesso("Todos os precatórios atualizados com sucesso.")
 
@@ -113,6 +126,7 @@ def main():
 Exemplos:
   python main.py buscar --cidade "São Paulo" --depre 12345
   python main.py historico --depre 12345
+  python main.py historico --depre 12345 --cidade "São Paulo"
   python main.py listar
   python main.py atualizar
         """,
@@ -134,6 +148,7 @@ Exemplos:
     # -- historico --
     p_hist = sub.add_parser("historico", help="Exibe histórico de posições de um DEPRE")
     p_hist.add_argument("--depre", required=True, help="Número do DEPRE")
+    p_hist.add_argument("--cidade", default=None, help="Filtrar por cidade (opcional)")
     p_hist.set_defaults(func=cmd_historico)
 
     # -- listar --

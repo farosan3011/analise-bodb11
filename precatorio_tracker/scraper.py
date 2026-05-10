@@ -10,7 +10,6 @@ quando algum campo não é encontrado.
 """
 
 import asyncio
-import json
 import re
 from typing import Optional
 
@@ -56,11 +55,11 @@ PESQUISA_SELECTORS = [
 
 
 async def _find_element(page: Page, selectors: list[str]) -> Optional[str]:
-    """Retorna o primeiro seletor que encontra um elemento na página."""
+    """Retorna o primeiro seletor que encontra um elemento visível na página."""
     for sel in selectors:
         try:
             el = await page.query_selector(sel)
-            if el:
+            if el and await el.is_visible():
                 return sel
         except Exception:
             continue
@@ -68,7 +67,7 @@ async def _find_element(page: Page, selectors: list[str]) -> Optional[str]:
 
 
 async def _diagnostico_form(page: Page):
-    """Imprime campos encontrados no formulário para ajudar a depurar seletores."""
+    """Imprime campos encontrados no formulário e salva screenshot para depuração."""
     campos = await page.evaluate("""() => {
         const inputs = Array.from(document.querySelectorAll('input, select, textarea'));
         return inputs.map(el => ({
@@ -84,31 +83,49 @@ async def _diagnostico_form(page: Page):
         print(f"  <{c['tag'].lower()}> id='{c['id']}' name='{c['name']}' type='{c['type']}'")
     print()
 
+    screenshot_path = "debug_tjsp_error.png"
+    await page.screenshot(path=screenshot_path, full_page=True)
+    print(f"[DIAGNÓSTICO] Screenshot salvo em: {screenshot_path}")
+
 
 async def _parse_table(page: Page) -> list[dict]:
-    """Extrai todas as linhas da tabela de resultados."""
+    """
+    Extrai todas as linhas da tabela de resultados.
+
+    Prefere tabelas com cabeçalhos <th> e pelo menos 3 colunas, evitando
+    as tables de layout que o ASP.NET gera para menus e estrutura da página.
+    """
     try:
-        # Aguarda qualquer tabela com dados aparecer
-        await page.wait_for_selector("table tr", timeout=15000)
+        await page.wait_for_selector("table", timeout=15000)
     except PlaywrightTimeout:
         return []
 
     linhas = await page.evaluate("""() => {
         const tables = Array.from(document.querySelectorAll('table'));
-        // Pega a maior tabela (mais dados)
+
+        // Prefere tabelas com <th> e múltiplas colunas (tabelas de dados)
+        // Descarta tabelas com menos de 3 colunas ou sem headers
         let melhorTabela = null;
-        let maxLinhas = 0;
+        let melhorScore = -1;
+
         for (const t of tables) {
+            const headers = t.querySelectorAll('th');
             const rows = t.querySelectorAll('tr');
-            if (rows.length > maxLinhas) {
-                maxLinhas = rows.length;
+            const cols = rows[0] ? rows[0].querySelectorAll('th, td').length : 0;
+
+            if (cols < 2) continue;
+
+            // Score: prioriza tabelas com <th> e mais linhas de dados
+            const score = (headers.length > 0 ? 100 : 0) + rows.length + cols;
+            if (score > melhorScore) {
+                melhorScore = score;
                 melhorTabela = t;
             }
         }
+
         if (!melhorTabela) return [];
 
         const rows = Array.from(melhorTabela.querySelectorAll('tr'));
-        // Extrai cabeçalho
         const headerRow = rows[0];
         const headers = Array.from(headerRow.querySelectorAll('th, td')).map(
             el => el.innerText.trim()
@@ -133,18 +150,19 @@ async def _parse_table(page: Page) -> list[dict]:
 
 def _extrair_posicao(dados_linha: dict) -> Optional[int]:
     """Tenta extrair número de posição/ordem da linha."""
-    chaves_posicao = ["posição", "posicao", "ordem", "Posição", "Ordem", "No.", "Nº"]
+    chaves_posicao = ["posição", "posicao", "ordem", "Posição", "Ordem", "No.", "Nº", "seq"]
     for chave in chaves_posicao:
         for k, v in dados_linha.items():
             if chave.lower() in k.lower():
                 nums = re.findall(r"\d+", str(v))
                 if nums:
                     return int(nums[0])
-    # Fallback: primeira coluna numérica
-    for v in dados_linha.values():
-        nums = re.findall(r"^\d+$", str(v).strip())
-        if nums:
-            return int(nums[0])
+    # Fallback conservador: primeira coluna cujo header sugere numeração
+    for k, v in dados_linha.items():
+        if any(p in k.lower() for p in ["num", "ord", "seq", "pos"]):
+            nums = re.findall(r"^\d+$", str(v).strip())
+            if nums:
+                return int(nums[0])
     return None
 
 
@@ -168,12 +186,25 @@ def _extrair_status(dados_linha: dict) -> Optional[str]:
     return None
 
 
-async def buscar_precatorio(cidade: str, depre: str, headless: bool = True) -> list[dict]:
-    """
-    Busca precatórios no TJSP para a cidade e número DEPRE informados.
+def _linha_contem_depre(linha: dict, depre: str) -> bool:
+    """Verifica se alguma célula da linha contém o número DEPRE."""
+    depre_normalizado = re.sub(r"\D", "", depre)
+    for v in linha.values():
+        celula = re.sub(r"\D", "", str(v))
+        if depre_normalizado and depre_normalizado in celula:
+            return True
+    return False
 
-    Retorna lista de dicionários com os dados encontrados.
-    Cada item inclui: posicao, valor, status, e todos os campos brutos da tabela.
+
+async def buscar_precatorio(cidade: str, depre: str, headless: bool = True) -> Optional[dict]:
+    """
+    Busca o precatório no TJSP para a cidade e número DEPRE informados.
+
+    Retorna um único dicionário com os dados encontrados (posicao, valor,
+    status e todos os campos brutos da tabela), ou None se não encontrado.
+
+    Quando a busca retorna múltiplas linhas (lista completa da fila), localiza
+    a linha que contém o número DEPRE e usa sua posição na tabela.
     """
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=headless)
@@ -189,7 +220,7 @@ async def buscar_precatorio(cidade: str, depre: str, headless: bool = True) -> l
         page = await context.new_page()
 
         try:
-            print(f"[*] Acessando TJSP...")
+            print("[*] Acessando TJSP...")
             await page.goto(TJSP_URL, wait_until="domcontentloaded", timeout=30000)
             await page.wait_for_load_state("networkidle", timeout=20000)
 
@@ -200,7 +231,6 @@ async def buscar_precatorio(cidade: str, depre: str, headless: bool = True) -> l
                 try:
                     await page.select_option(comarca_sel, label=cidade)
                 except Exception:
-                    # Tenta por valor parcial
                     options = await page.eval_on_selector_all(
                         f"{comarca_sel} option",
                         "els => els.map(o => ({value: o.value, text: o.innerText.trim()}))",
@@ -215,6 +245,10 @@ async def buscar_precatorio(cidade: str, depre: str, headless: bool = True) -> l
                         for o in options[:20]:
                             print(f"    {o['text']}")
                         raise ValueError(f"Comarca '{cidade}' não encontrada na lista.")
+
+                # Aguarda possível postback do ASP.NET UpdatePanel após trocar comarca
+                await asyncio.sleep(1.5)
+                await page.wait_for_load_state("networkidle", timeout=10000)
             else:
                 print("[!] Campo de comarca não encontrado. Executando diagnóstico...")
                 await _diagnostico_form(page)
@@ -244,38 +278,64 @@ async def buscar_precatorio(cidade: str, depre: str, headless: bool = True) -> l
             linhas = await _parse_table(page)
 
             if not linhas:
-                # Verifica se há mensagem de "nenhum resultado"
                 texto_pagina = await page.inner_text("body")
                 if any(
                     t in texto_pagina.lower()
                     for t in ["não encontrado", "nenhum", "sem resultado"]
                 ):
-                    print(f"[!] Nenhum resultado encontrado para DEPRE {depre} em {cidade}.")
-                    return []
+                    print(f"[!] Nenhum resultado para DEPRE {depre} em {cidade}.")
                 else:
-                    print("[!] Tabela de resultados não parseada. Diagnóstico do formulário:")
+                    print("[!] Tabela de resultados não encontrada. Diagnóstico:")
                     await _diagnostico_form(page)
-                    return []
+                return None
 
-            print(f"[✓] {len(linhas)} resultado(s) encontrado(s).")
+            # -- Localizar a linha do precatório --
+            # Se a busca filtrou corretamente, há 1 linha. Se retornou lista
+            # completa da fila, procura a linha que contém o número DEPRE.
+            linha_alvo = None
+            posicao_na_fila = None
 
-            # Enriquece cada linha com campos extraídos
-            resultados = []
-            for linha in linhas:
-                item = dict(linha)
-                item["posicao"] = _extrair_posicao(linha)
-                item["valor"] = _extrair_valor(linha) or linha.get("Valor", "")
-                item["status"] = _extrair_status(linha) or linha.get("Status", "")
-                item["cidade"] = cidade
-                item["depre"] = depre
-                resultados.append(item)
+            if len(linhas) == 1:
+                linha_alvo = linhas[0]
+                posicao_na_fila = _extrair_posicao(linhas[0])
+            else:
+                print(f"[*] {len(linhas)} linhas retornadas — localizando DEPRE {depre}...")
+                for i, linha in enumerate(linhas):
+                    if _linha_contem_depre(linha, depre):
+                        linha_alvo = linha
+                        # Posição na fila = número da linha (1-based) se não houver coluna explícita
+                        posicao_na_fila = _extrair_posicao(linha) or (i + 1)
+                        print(f"[✓] DEPRE encontrado na linha {i + 1} de {len(linhas)}.")
+                        break
 
-            return resultados
+                if linha_alvo is None:
+                    print(f"[!] DEPRE {depre} não encontrado nas {len(linhas)} linhas retornadas.")
+                    return None
 
+            resultado = dict(linha_alvo)
+            resultado["posicao"] = posicao_na_fila
+            resultado["valor"] = _extrair_valor(linha_alvo) or linha_alvo.get("Valor", "")
+            resultado["status"] = _extrair_status(linha_alvo) or linha_alvo.get("Status", "")
+            resultado["cidade"] = cidade
+            resultado["depre"] = depre
+            resultado["total_fila"] = len(linhas) if len(linhas) > 1 else None
+
+            print(f"[✓] Dados capturados — posição: {posicao_na_fila}")
+            return resultado
+
+        except Exception:
+            # Salva screenshot para facilitar depuração em caso de erro inesperado
+            try:
+                await page.screenshot(path="debug_tjsp_erro.png", full_page=True)
+                print("[!] Screenshot salvo em debug_tjsp_erro.png")
+            except Exception:
+                pass
+            raise
         finally:
+            await context.close()
             await browser.close()
 
 
-def buscar(cidade: str, depre: str, headless: bool = True) -> list[dict]:
+def buscar(cidade: str, depre: str, headless: bool = True) -> Optional[dict]:
     """Interface síncrona para buscar_precatorio."""
     return asyncio.run(buscar_precatorio(cidade, depre, headless))
