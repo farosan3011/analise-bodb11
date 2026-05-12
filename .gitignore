@@ -8,3 +8,8 @@ precatorio_tracker/data/
 
 # Site extraído do zip (gerado, não versionar)
 site_bodb11/
+
+# Artefatos de diagnóstico gerados em tempo de execução
+precatorio_tracker/diagnostico_campos.json
+precatorio_tracker/diagnostico_tjsp.png
+precatorio_tracker/debug_tjsp_erro.png
