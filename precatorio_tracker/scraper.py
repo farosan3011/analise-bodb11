@@ -83,7 +83,7 @@ async def _diagnostico_form(page: Page):
         print(f"  <{c['tag'].lower()}> id='{c['id']}' name='{c['name']}' type='{c['type']}'")
     print()
 
-    screenshot_path = "debug_tjsp_error.png"
+    screenshot_path = "debug_tjsp_erro.png"
     await page.screenshot(path=screenshot_path, full_page=True)
     print(f"[DIAGNÓSTICO] Screenshot salvo em: {screenshot_path}")
 
@@ -216,6 +216,7 @@ async def buscar_precatorio(cidade: str, depre: str, headless: bool = True) -> O
             ),
             locale="pt-BR",
             timezone_id="America/Sao_Paulo",
+            ignore_https_errors=True,
         )
         page = await context.new_page()
 

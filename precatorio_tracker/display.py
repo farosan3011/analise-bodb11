@@ -31,6 +31,9 @@ def mostrar_resultado(dados: dict, anterior: Optional[dict] = None):
     capturado = dados.get("capturado_em", "agora")
 
     posicao_str = str(posicao) if posicao is not None else "—"
+    total_fila = dados.get("total_fila")
+    if total_fila:
+        posicao_str += f" de {total_fila}"
     if anterior:
         var = _variacao(posicao, anterior.get("posicao"))
         posicao_str += f"  ({var})"
@@ -136,29 +139,6 @@ def mostrar_lista(precatorios: list[dict]):
 
     console.print(t)
 
-
-def mostrar_multiplos_resultados(resultados: list[dict]):
-    """Exibe tabela quando a busca retorna múltiplos precatórios."""
-    if not resultados:
-        return
-
-    t = Table(title="Resultados da Busca", box=box.ROUNDED, show_lines=True)
-
-    # Coleta todos os campos únicos (exceto os internos)
-    campos_internos = {"posicao", "valor", "status", "cidade", "depre"}
-    todos_campos = []
-    for r in resultados:
-        for k in r.keys():
-            if k not in campos_internos and k not in todos_campos:
-                todos_campos.append(k)
-
-    for c in todos_campos:
-        t.add_column(c, min_width=10)
-
-    for r in resultados:
-        t.add_row(*[str(r.get(c, "")) for c in todos_campos])
-
-    console.print(t)
 
 
 def erro(msg: str):

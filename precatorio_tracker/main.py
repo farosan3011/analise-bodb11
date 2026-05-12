@@ -3,12 +3,17 @@
 Assistente de Rastreamento de Precatórios TJSP
 
 Uso:
-  python main.py buscar --cidade "São Paulo" --depre 12345
-  python main.py historico --depre 12345
-  python main.py historico --depre 12345 --cidade "São Paulo"
-  python main.py listar
-  python main.py atualizar
+  python precatorio_tracker/main.py buscar --cidade "São Paulo" --depre 12345
+  python precatorio_tracker/main.py historico --depre 12345
+  python precatorio_tracker/main.py listar
+  python precatorio_tracker/main.py atualizar
 """
+
+import sys
+from pathlib import Path
+
+# Garante que os módulos do pacote sejam encontrados independente do cwd
+sys.path.insert(0, str(Path(__file__).parent))
 
 import argparse
 
@@ -33,8 +38,12 @@ def cmd_buscar(args):
     anterior = historico[1] if len(historico) > 1 else None
 
     dados_exibir = dados.copy()
-    if historico:
+    if salvo and historico:
+        # Usa timestamp do snapshot recém-gravado
         dados_exibir["capturado_em"] = historico[0]["capturado_em"]
+    elif not salvo:
+        # Sem mudança: não sobrescreve o timestamp dos dados atuais (vem como "agora")
+        dados_exibir.pop("capturado_em", None)
 
     display.mostrar_resultado(dados_exibir, anterior=anterior)
 
@@ -94,8 +103,10 @@ def cmd_atualizar(args):
                 historico = db.get_history(depre, cidade)
                 anterior = historico[1] if len(historico) > 1 else None
                 dados_exibir = dados.copy()
-                if historico:
+                if salvo and historico:
                     dados_exibir["capturado_em"] = historico[0]["capturado_em"]
+                elif not salvo:
+                    dados_exibir.pop("capturado_em", None)
                 display.mostrar_resultado(dados_exibir, anterior=anterior)
                 if not salvo:
                     display.aviso("Sem mudanças desde a última consulta.")
